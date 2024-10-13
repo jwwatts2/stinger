@@ -4,7 +4,7 @@ Stinger is a software agent that detects piggybacking and tailgating to prevent 
 
 This is currently a work in progress.
 
-facerecogutils.py contains the classes and helper functions used in the system.  Uses face_recognition and numpy for face detectiona and face recognition.
+facerecogutils.py contains the classes and helper functions used in the system.  Uses face_recognition and numpy for face detection and face recognition.
 
 gettrainingimages.py is used to process all video files in the specified directory and save all the individual face images and their encodings that can be found in each video file.
 
