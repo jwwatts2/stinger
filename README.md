@@ -10,4 +10,4 @@ gettrainingimages.py is used to process all video files in the specified directo
 
 testrecognition.py is used to to process all video files in the specified directory and peform facial recognition on any faces found.
 
-getmetrics.py processes a spreadsheet containing results of a run of testrecognition.  It produces a CSV file of metrics to be imported into a spreadsheet.  Uses pandas to read and excel file.
+getmetrics.py processes a spreadsheet containing results of a run of testrecognition.  It produces a CSV file of metrics to be imported into a spreadsheet.  Uses pandas to read an excel file.
