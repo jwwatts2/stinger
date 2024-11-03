@@ -11,7 +11,6 @@ import secrets
 import string
 
 debug = False # set to True to display video frames with face rectangles
-#MINAREA = 1849 # minimum area of a face in pixels, ignore smaller faces
 MINAREA = 2700 # minimum area of a face in pixels, ignore smaller faces
 
 class Face:
@@ -24,12 +23,11 @@ class Face:
 
     def save(self, imageDir):
         # use md5 hash of face encoding as filename
-        baseFileName = hashFaceEncoding(self.encoding)
-        fullFileName = imageDir + baseFileName + '.png'
+        fullFileName = imageDir + self.filename() + '.jpg'
         cv2.imwrite(fullFileName, self.frame[self.location[0]:self.location[2], 
                                              self.location[3]:self.location[1]])
         # now save the face encoding to a file
-        encodingFileName = imageDir + baseFileName + '.enc'
+        encodingFileName = imageDir + self.filename() + '.enc'
         with open(encodingFileName, 'wb') as f:
             pickle.dump(self.encoding, f)
 
@@ -45,6 +43,9 @@ class Face:
     
     def heigth(self):
         return self.location[2] - self.location[0]
+    
+    def filename(self):
+        return hashFaceEncoding(self.encoding)
 
 class Employee:
     def __init__(self, name, faceEncoding, status):
@@ -60,11 +61,9 @@ def loadActiveEmployees():
         if os.path.isdir(imageBaseDir + dir):
             for file in os.listdir(imageBaseDir + dir):
                 if file.endswith('.enc'):
-                    # might want to limit number of images per employee
                     empEncoding = ''
                     with open(imageBaseDir + dir + '\\' + file, 'rb') as f:
                         empEncoding = pickle.load(f)
-                    # might need to remove duplicates
                     activeEmployees.append(Employee(dir, empEncoding, 'active'))
     return activeEmployees
 
@@ -76,9 +75,7 @@ def loadInactiveEmployees():
         if os.path.isdir(imageBaseDir + dir):
             for file in os.listdir(imageBaseDir + dir):
                 if file.endswith('.enc'):
-                    # might want to limit number of images per employee
                     empEncoding = ''
-                    # need some error handling here
                     with open(imageBaseDir + dir + '\\' + file, 'rb') as f:
                         empEncoding = pickle.load(f)
                     inactiveEmployees.append(Employee(dir, empEncoding, 'inactive'))
@@ -107,9 +104,11 @@ def detectFaces(frame, timestamp, facesToIgnore):
     faceLocs = face_recognition.face_locations(rgb_img)
     faceEncodings = face_recognition.face_encodings(rgb_img, faceLocs, model='small') #large model produces more false positives and false negatives
     faces = []
+    faceDetected = False
     for faceLoc, faceEncoding in zip(faceLocs, faceEncodings):
         face = Face(faceEncoding, frame, faceLoc, timestamp)
-        if face.heigth() * face.width() > MINAREA:
+        faceDetected = True
+        if face.heigth() * face.width() >= MINAREA:
             found = findClosestFaceMatch(face, facesToIgnore, tolerance=0.5)
             if found is None:
                 faces.append(face)
@@ -118,6 +117,7 @@ def detectFaces(frame, timestamp, facesToIgnore):
                     displayImage(frame)
             else:
                 # this is a face to ignore
+                faceDetected = False
                 if debug:
                     cv2.rectangle(frame, (faceLoc[3], faceLoc[0]), (faceLoc[1], faceLoc[2]), (0, 0, 255), 2)
                     displayImage(frame)
@@ -126,7 +126,7 @@ def detectFaces(frame, timestamp, facesToIgnore):
             if debug:
                 cv2.rectangle(frame, (faceLoc[3], faceLoc[0]), (faceLoc[1], faceLoc[2]), (255, 0, 0), 2)
                 displayImage(frame)
-    return faces
+    return faces, faceDetected
 
 def resizeFrame(img):
     scale_percent = 50
@@ -159,7 +159,6 @@ def findClosestEmployeeMatch(face, employees, tolerance=0.4):
 
 def getUniqueFaces(faces):
     uniqueFaces = []
-    #print (f'uniqueFaces = {uniqueFaces}')
     firstTime = True
     for face in (faces):
         if firstTime:
@@ -192,6 +191,22 @@ def hashFaceEncoding(faceEncoding):
 def vprint(verbose, msg, end='\n'):
     if verbose:
         print(msg, end=end)
+
+def getFrameFromVideo(videoFile, timestamp):
+    tempFileName = 'temp'+''.join(secrets.choice(string.digits) for i in range(6))+'.mp4'
+    os.system(f'del {tempFileName} > NUL 2>&1')
+    cmd = f'ffmpeg-7.0.2-full_build\\bin\\ffmpeg -i "{videoFile}" {tempFileName} > NUL 2>&1'
+    os.system(cmd)
+    video = cv2.VideoCapture(tempFileName)
+    framesPerSecond = int(video.get(cv2.CAP_PROP_FPS))
+    frameNumber = int(timestamp * framesPerSecond)
+    video.set(cv2.CAP_PROP_POS_FRAMES, frameNumber)
+    result, frame = video.read()
+    video.release()
+    return frame
+
+def saveFrame(frame, filename):
+    cv2.imwrite(filename, resizeFrame(resizeFrame(frame)))    
     
 def findFacesInVideo(videoFile, facesToIgnore, verbose=False):
     # convert video to mp4 using ffmpeg
@@ -206,7 +221,7 @@ def findFacesInVideo(videoFile, facesToIgnore, verbose=False):
     endTime = time.time()
     if not os.path.exists(tempFileName):
         vprint(verbose, f'Cannot find {tempFileName}')
-        exit()
+        return []
     vprint(verbose, f'done in {endTime - startTime} seconds')
 
     video = cv2.VideoCapture(tempFileName)
@@ -215,13 +230,8 @@ def findFacesInVideo(videoFile, facesToIgnore, verbose=False):
     if framesPerSecond > 15: # could make this a parameter too
         adjustedFramesPerSecond = 15
     totalFrames = video.get(cv2.CAP_PROP_FRAME_COUNT)
-    # AXIS Companion video files start 5 seconds before motion starts
-    # so we'll skip the first 5 seconds, should make this a parameter
-    firstFrameToProcess = adjustedFramesPerSecond*5
-    #firstFrameToProcess = adjustedFramesPerSecond*60 # skip the first minute for testing only
-    # AXIS Companion video files run for 30 seconds after motion stops
-    # so we'll skip the last 30 seconds, should make this a parameter too
-    lastFrameToProcess = totalFrames - adjustedFramesPerSecond*30 
+    firstFrameToProcess = 1
+    lastFrameToProcess = totalFrames
     vprint(verbose, msg=f'total frames = {totalFrames}')
     vprint(verbose, msg=f'frames per second = {framesPerSecond}')
     vprint(verbose, msg=f'adjusted frames per second = {adjustedFramesPerSecond}')
@@ -243,18 +253,15 @@ def findFacesInVideo(videoFile, facesToIgnore, verbose=False):
             break
         timestamp = frameCnt / framesPerSecond
         if frameCnt % frameCheckRate == 0: 
-            faces = detectFaces(frame, timestamp, facesToIgnore)
+            faces, faceDetected = detectFaces(frame, timestamp, facesToIgnore)
             vprint(verbose, msg=f'{len(faces)}', end='')
-            if len(faces) > 0:
+            if faceDetected:
                 for face in faces:
                     facesEntireVideo.append(face)
                 # we found at least 1 face, so we'll check more frequently for a bit
-                if frameCheckRate > 7:
-                    frameCheckRate = frameCheckRate // 2
-                else:
-                    frameCheckRate = originalFrameCheckRate
-            else:
-                frameCheckRate = originalFrameCheckRate
+                frameCheckRate = 1
+            if frameCheckRate < originalFrameCheckRate:
+                frameCheckRate += 1
         if debug: 
             cv2.imshow('face_recognition test video file', resizeFrame(frame))
             if cv2.waitKey(1) == ord('q'):
@@ -269,70 +276,48 @@ def findFacesInVideo(videoFile, facesToIgnore, verbose=False):
     
     return facesEntireVideo
 
+def addFaceToActiveEmployees(face, name):
+    imageDir = 'C:\\Users\\jwatts\\pythonstuff\\project\\faces\\active\\' # should make this a parameter
+    imageDir = imageDir + name + '\\'
+    # create directory if it doesn't exist
+    if not os.path.exists(imageDir):
+        os.makedirs(imageDir)
+    # get the number of images for this employee
+    numImages = len([f for f in os.listdir(imageDir) if f.endswith('.enc')])
+    if numImages > 5:
+        # we have too many images, remove the smallest face
+        smallestFaceFile = None
+        smallestFaceArea = 999999
+        for file in os.listdir(imageDir):
+            if file.endswith('.png') or file.endswith('.jpg'):
+                img = cv2.imread(imageDir + file)
+                area = img.shape[0] * img.shape[1]
+                if area < smallestFaceArea:
+                    smallestFaceArea = area
+                    smallestFaceFile = file.splt('.')[0]
+                    smallestFaceExt = file.split('.')[1]
+
+        if smallestFaceFile is not None:
+            # rename the face files
+            os.rename(imageDir + smallestFaceFile + '.enc', imageDir + smallestFaceFile + '.encOLD')
+            os.rename(imageDir + smallestFaceFile + '.' + smallestFaceExt, imageDir + smallestFaceFile 
+                      + '.' + smallestFaceExt + 'OLD')
+            face.save(imageDir)
+    else:
+        face.save(imageDir)
+
 if __name__ == "__main__":
     logDir = 'C:\\Users\\jwatts\\pythonstuff\\project\\logs\\'
 
-    #target = 'C:\\Users\\jwatts\\Documents\\AXIS Companion - Clips\\ACCC8EA98F27 - 50DD_7-31-2024_7-21-25 AM.asf' # 1 face
-    #target = 'C:\\Users\\jwatts\\Documents\\AXIS Companion - Clips\\ACCC8EA98F27 - 50DD_7-31-2024_7-31-45 AM.asf' # 2 faces
-    #target = 'C:\\Users\\jwatts\\Documents\\AXIS Companion - Clips\\ACCC8EA98F27 - 50DD_7-31-2024_7-53-28 AM.asf' # 5 faces
-    #target = 'C:\\Users\\jwatts\\Documents\\AXIS Companion - Clips\\ACCC8EA98F27 - 50DD_7-31-2024_1-04-06 PM.asf' # 0 face
-    # first training run detected more faces than expected
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_1-04-56 PM.asf' 
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_10-12-17 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_10-20-25 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_11-19-13 AM.asf' # fire alarm
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_11-24-31 AM.asf' # fire alarm
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_11-27-45 AM.asf' 
-    # first training run detected less faces than expected
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_10-31-49 AM.asf' 
-    # second training run detected more faces than expected after adjusting MINAREA for deduplication
-    # target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_12-55-32 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_4-56-40 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_7-55-46 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_8-00-21 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_9-35-10 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_12-32-48 PM.asf'
-    # third training run detected more faces than expected after adjusting fps calculation
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_7-46-44 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_9-56-22 AM.asf'
-    # second training run detected less faces than expected
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_2-55-32 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_3-14-58 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_3-20-44 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_3-46-15 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_5-17-29 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_5-54-14 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_7-34-38 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_9-29-58 AM.asf'
-    # problems from first recongition run
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_1-28-35 PM.asf' # need more faces for haley, she is looking down
-    # this is a good one.  Even matches when subject is wearing sunglasses
-    # use for testing recognition time vs database size.  takes 0.01s with 7 faces in database
-    # takes 0.001s with new matching algorithm with 199 faces in database
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\training\\ACCC8EA98F27 - 50DD_7-31-2024_1-57-54 PM.asf' 
-    # some files from the testing run to expierment with
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_1-01-17 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_1-02-43 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_1-04-00 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_1-38-20 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_10-06-51 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_12-30-58 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_7-52-15 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_1-24-46 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_1-26-48 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_12-03-04 PM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_9-48-27 AM.asf'
-    #target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_1-28-33 PM.asf'
-    target = 'C:\\Users\\jwatts\\pythonstuff\\project\\videos\\testing\\ACCC8EA98F27 - 50DD_8-12-2024_1-10-42 PM.asf'
+    debug = True
+    target = '.\\downloadedvideos\\ACCC8EA989FF_20241101_113852.mkv'
 
     startTime = time.time()
     print(f'loading active employees...', end='')
     activeEmployees = loadActiveEmployees()
     endTime = time.time()
     print(f'loaded {len(activeEmployees)} active employees in {endTime - startTime} seconds')
-    #print(f'activeEmployeeFaces = {[e.name for e in activeEmployees]}')
     inactiveEmployees = loadInactiveEmployees()
-    #print(f'inactiveEmployeeFaces = {[e.name for e in inactiveEmployees]}')
     facesToIgnore = loadFacesToIgnore()
     print(f'loaded {len(facesToIgnore)} "faces" to ignore')
     print(f'processing {target}...', end='')
