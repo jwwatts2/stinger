@@ -2,7 +2,7 @@ import argparse
 import os
 import pandas as pd
 import facerecogutils as fr
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import subprocess
 import paramiko
@@ -50,7 +50,7 @@ class DetectionEvent:
         self.authorized = authorized
         self.face = None
 
-def sendEmail(message, subject):
+def sendEmail(message, subject, outputFileName):
     message = message.replace('\n', '\t\r\n')
     filename = None
     if message.find('See image file') > -1:
@@ -76,13 +76,15 @@ def sendEmail(message, subject):
         att.add_header('Content-Disposition', 'attachment', filename='stinger.png')
         msg.attach(att)
     s = smtplib.SMTP('smtp.gmail.com', 587)
-    s.starttls()
-    appPassword = os.environ['GMAIL_PASSWORD']
-    s.login(stingerEmail, appPassword)
-    s.send_message(msg)
+    try:
+        s.starttls()
+        s.login(stingerEmail, appPassword)
+        s.send_message(msg)
+    except Exception as e:  
+        logit(outputFileName, f'error sending email: {e}')
     s.quit()
 
-def sendSMS(message, subject):
+def sendSMS(message, subject, outputFileName):
     message = message[:100] # only send the first 100 characters of the message
     message = message.replace('\n', '\t\r\n')
     msg = MIMEText(message)
@@ -93,9 +95,12 @@ def sendSMS(message, subject):
     msg['To'] = stingerUserSMS
     msg['Subject'] = 'Stinger: '+subject
     s = smtplib.SMTP('smtp.gmail.com', 587)
-    s.starttls()
-    s.login(stingerEmail, appPassword)
-    s.send_message(msg)
+    try:
+        s.starttls()
+        s.login(stingerEmail, appPassword)
+        s.send_message(msg)
+    except Exception as e:  
+        logit(outputFileName, f'error sending SMS: {e}')
     s.quit()
 
 def oprint(outputFileName, msg, mode='investigate', end='\n'):
@@ -107,8 +112,10 @@ def oprint(outputFileName, msg, mode='investigate', end='\n'):
         if msg[0] != '<':
             logit(outputFileName, msg)
             if msg.find('ALERT:') > -1 or msg.find('ERROR:') > -1:
-                sendEmail(msg, 'Alert')
-                sendSMS('check email for details', 'Alert')
+                currentDT = datetime.now()
+                subject = f'Alert at {currentDT.strftime("%m/%d/%Y %H:%M:%S")}'
+                sendEmail(msg, subject, outputFileName)
+                sendSMS('check email for details', subject, outputFileName)
         return
     # replace leading spaces with &nbsp; so the html file will display correctly
     msg = msg.replace('    ', '&nbsp;&nbsp;&nbsp;&nbsp;')
@@ -163,7 +170,7 @@ def getVideoFileName(door, date, time, mode='investigate'):
         fileName = camera + '_' + date.replace('/', '-') + '_' + time.replace(':', '-') + '.asf'
     return fileName
 
-def getTargetVideo(videos, entry, mode='investigate'):
+def getTargetVideo(videos, entry, fullPathMap, videopath, outputFileName, mode='investigate'):
     targetVideoName = getVideoFileName(entry.door, entry.date, entry.time, mode)
     targetCamera = targetVideoName.split('_')[0]
     targetTime = getStartTime(targetVideoName)
@@ -173,8 +180,18 @@ def getTargetVideo(videos, entry, mode='investigate'):
         time = getStartTime(video)
         if camera == targetCamera:
             if time < targetTime:
-                targetVideo = video
-                break
+                if mode == 'monitor':
+                    # download the target video and check it's length
+                    tempVideo = downloadVideo(video, fullPathMap, videopath, outputFileName)
+                    len = fr.getlenghtOfVideo(videopath+'\\'+tempVideo)
+                    end = time + timedelta(seconds=len)
+                    if end > targetTime:
+                        # if the entry event happens before the end of the video, then this is the target video
+                        targetVideo = video
+                        break                        
+                else:
+                    targetVideo = video
+                    break
     return targetVideo
     
 def getNextEntryEvent(doorLog, i):
@@ -228,7 +245,7 @@ def processVideo(video, videopath, entries, outputFileName, mode='investigate'):
     for entry in entries:
         detections.append(DetectionEvent(entry.shortName(), (entry.timestamp() - getStartTime(video)).total_seconds(), 'door log', True))
     faces = fr.findFacesInVideo(videopath+'\\'+video, facesToIgnore, verbose=False)
-    cleanUp = False
+    cleanUp = True
     if len(faces) > 0:
         uniqueFaces = fr.getUniqueFaces(faces)
         fr.identifyFaces(activeEmployees, inactiveEmployees, uniqueFaces)
@@ -247,15 +264,14 @@ def processVideo(video, videopath, entries, outputFileName, mode='investigate'):
         processedNames = []
         unknownMatches = []
         i = 0
-        lastAthorized = None
+        lastAuthorized = None
         lastUnauthorized = None
         for detection in detections:
             if detection.name in processedNames:
                 continue
             if detection.authorized:
-                lastAthorized = detection
+                lastAuthorized = detection
                 oprint(outputFileName, f'    INFO: Authorized entry by {detection.name} at {int(detection.timestamp)} seconds into the video', mode)
-                cleanUp = True
                 if detection.face is None and detection.name not in unknownMatches:
                     cleanUp = False
                     oprint(outputFileName, f'    WARNING: face not recognized for entry of {detection.name}', mode)
@@ -295,7 +311,7 @@ def processVideo(video, videopath, entries, outputFileName, mode='investigate'):
                     cleanUp = False
                     oprint(outputFileName, f'    ALERT: Unauthorized entry by {detection.name}. Check {int(detection.timestamp)} seconds into {video}\n' +
                                            f'         See image file {logDir+detection.face.filename()}.jpg', mode)
-                if lastAthorized is not None and abs(detection.timestamp - lastAthorized.timestamp) < 5:
+                if lastAuthorized is not None and abs(detection.timestamp - lastAuthorized.timestamp) < 5:
                     cleanUp = False
                     oprint(outputFileName, f'    ALERT: tailgating detected at {int(detection.timestamp)} seconds into the {video}', mode)
                     if outputFileName is not None:
@@ -363,6 +379,7 @@ def investigate(logpath, videopath, outputFileName):
 
     entries = []
     processedEntries = []
+    fullPathMap = {}
     i, entry = getNextEntryEvent(doorLog, 0)
     jumpBack = i
     while entry is not None:
@@ -371,7 +388,7 @@ def investigate(logpath, videopath, outputFileName):
             entries.append(entry)
             processedEntries.append(i)
             oprint(outputFileName, f'{entry.door} log indicates entry at {entry.date} {entry.time} by {entry.shortName()}')
-            targetVideo = getTargetVideo(videos, entry)
+            targetVideo = getTargetVideo(videos, entry, fullPathMap, videopath, outputFileName)
             if targetVideo is None:
                 oprint(outputFileName, f'    ERROR: {targetVideo} not found')
             else:
@@ -382,7 +399,7 @@ def investigate(logpath, videopath, outputFileName):
                 j, lookAheadEntry = getNextEntryEvent(doorLog, j)
                 while lookAheadEntry is not None:
                     if j not in processedEntries:
-                        nextTargetVideo = getTargetVideo(videos, lookAheadEntry)
+                        nextTargetVideo = getTargetVideo(videos, lookAheadEntry, fullPathMap, videopath, outputFileName)
                         if lookAheadEntry.door == entry.door: 
                             if nextTargetVideo == targetVideo:
                                 oprint(outputFileName, f'        This video will also show entry at {lookAheadEntry.date} {lookAheadEntry.time} by {lookAheadEntry.shortName()}')
@@ -538,7 +555,7 @@ def downloadVideo(video, fullPathMap, videopath, outputFileName):
     return downloadedVideo
 
 def monitor(videopath, outputFileName):
-    logit(outputFileName,'Stinger monitoring started')
+    logit(outputFileName,'Stinger monitor mode started')
 
     global activeEmployees
     activeEmployees = fr.loadActiveEmployees()
@@ -551,14 +568,16 @@ def monitor(videopath, outputFileName):
     logit(outputFileName,f'loaded {len(facesToIgnore)} "faces" to ignore')
 
     # run the Entrapass GUI driver in the background
+    logit(outputFileName,'starting Entrapass GUI driver')
     subprocess.Popen(['python', 'entradriver.py'])
-    time.sleep(10)
+    time.sleep(90) # wait for Entrapass app to start
 
     # monitor the log file for new entries
     videos = None
     doorLog = None
     fullPathMap = {}
     i = 0
+    logit(outputFileName,'monitoring started')
     while True:
         entries = []
         processedEntries = []
@@ -580,16 +599,16 @@ def monitor(videopath, outputFileName):
                 entries.append(entry)
                 processedEntries.append(i)
                 logit(outputFileName, f'{entry.door} log indicates entry at {entry.date} {entry.time} by {entry.shortName()}')
-                time.sleep(30) # wait 30 seconds for the video to be uploaded to the server
+                time.sleep(60) # wait 60 seconds for the video to be uploaded to the server
                 videos, hasNewVideos = getNewVideos(videos, fullPathMap, outputFileName)
-                targetVideo = getTargetVideo(videos, entry, mode='monitor')
+                targetVideo = getTargetVideo(videos, entry, fullPathMap, videopath, outputFileName, mode='monitor')
                 if targetVideo is None:
                     start = time.time()
                     while targetVideo is None and time.time() - start < 300: # wait up to 5 minutes for new videos
-                        time.sleep(30)
+                        time.sleep(60)
                         videos, hasNewVideos = getNewVideos(videos, fullPathMap, outputFileName)
                         if hasNewVideos:
-                            targetVideo = getTargetVideo(videos, entry, mode='monitor')
+                            targetVideo = getTargetVideo(videos, entry, fullPathMap, videopath, outputFileName, mode='monitor')
                 if targetVideo is None:
                     logit(outputFileName, f'    ERROR: video not found on server for entry by {entry.shortName()}')
                 else:
@@ -602,11 +621,11 @@ def monitor(videopath, outputFileName):
                     while hasNewEntries == False and time.time() - start < 30: # wait up to 30 seconds for new entries
                         time.sleep(10)
                         doorLog, hasNewEntries = getNewEntries(doorLog, outputFileName)
+                        videos, hasNewVideos = getNewVideos(videos, fullPathMap, outputFileName)
                     j, lookAheadEntry = getNextEntryEvent(doorLog, j)
                     while lookAheadEntry is not None:
                         if j not in processedEntries:
-                            videos, hasNewVideos = getNewVideos(videos, fullPathMap, outputFileName)
-                            nextTargetVideo = getTargetVideo(videos, lookAheadEntry, mode='monitor')
+                            nextTargetVideo = getTargetVideo(videos, lookAheadEntry, fullPathMap, videopath, outputFileName, mode='monitor')
                             if lookAheadEntry.door == entry.door: 
                                 if nextTargetVideo == targetVideo:
                                     logit(outputFileName, f'        This video will also show entry at {lookAheadEntry.date} {lookAheadEntry.time} by {lookAheadEntry.shortName()}')
@@ -615,7 +634,8 @@ def monitor(videopath, outputFileName):
                                 else:
                                     # we're on the same door, but we've moved to a different video
                                     break
-                        doorLog, hasNewEntries = getNewEntries(doorLog, outputFileName)
+                        #doorLog, hasNewEntries = getNewEntries(doorLog, outputFileName)
+                        #videos, hasNewVideos = getNewVideos(videos, fullPathMap, outputFileName)
                         j += 1
                         j, lookAheadEntry = getNextEntryEvent(doorLog, j)
                     targetVideo = downloadVideo(targetVideo, fullPathMap, videopath, outputFileName)
@@ -628,7 +648,6 @@ def monitor(videopath, outputFileName):
             doorLog, hasNewEntries = getNewEntries(doorLog, outputFileName)
             i += 1
             i, entry = getNextEntryEvent(doorLog, i)
-
 
 
 if __name__ == "__main__":
@@ -644,6 +663,7 @@ if __name__ == "__main__":
             print('output file exists.  overwrite? (y/n)')
             response = input()
             if response.lower() == 'y':
+                os.rename(args.output, f'{args.output}.{int(time.time())}')
                 os.system(f'del {args.output} > NUL 2>&1')
     else:
         print('no output file specified, outputting to console')

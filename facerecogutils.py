@@ -137,32 +137,52 @@ def resizeFrame(img):
 
 def findClosestFaceMatch(face, knownFaces, tolerance=0.4):
     knownFaceEncodings = np.array([e.encoding for e in knownFaces])
-    minDistance = tolerance
     closestFace = None
     distances = face_recognition.face_distance(knownFaceEncodings, face.encoding)
+    closestFaces = {}
     for distance, knownFace in zip(distances, knownFaces):
-        if distance < minDistance:
-            minDistance = distance
-            closestFace = knownFace
+        if distance < tolerance:
+            # if the face is already in the closestFaces dictionary, increase the neighbor count
+            if knownFace in closestFaces:
+                closestFaces[knownFace] += 1
+            else:
+                closestFaces[knownFace] = 1
+    if len(closestFaces) > 0:
+        closestFace = max(closestFaces, key=closestFaces.get)
     return closestFace
+
+class Neighbor:
+    def __init__(self, employee, cnt, avgDistance):
+        self.employee = employee
+        self.cnt = cnt
+        self.avgDistance = avgDistance
 
 def findClosestEmployeeMatch(face, employees, tolerance=0.4):
     knownFaceEncodings = np.array([e.faceEncoding for e in employees])
-    minDistance = tolerance
     closestFace = None
     distances = face_recognition.face_distance(knownFaceEncodings, face.encoding)
+    closestFaces = {}
     for distance, employee in zip(distances, employees):
-        if distance < minDistance:
-            minDistance = distance
-            closestFace = employee
+        if distance < tolerance:
+            if employee in closestFaces:
+                closestFaces[employee].avgDistance = (closestFaces[employee].avgDistance * closestFaces[employee].cnt + distance) / (closestFaces[employee].cnt + 1)
+                closestFaces[employee].cnt += 1
+            else:
+                closestFaces[employee] = Neighbor(employee, 1, distance)
+    if len(closestFaces) > 0:
+        closestFace = min(closestFaces, key=lambda x: closestFaces[x].avgDistance)
     return closestFace
 
 def getUniqueFaces(faces):
     uniqueFaces = []
     firstTime = True
-    for face in (faces):
+    numFaces = len(faces)
+    for i in range(numFaces-1, -1, -1):
+        face = faces[i]
+        if face is None:
+            continue
         if firstTime:
-            # seed with first face
+            # seed with first face (actually the last face since it should be the best image)
             uniqueFaces.append(face)
             firstTime = False
             continue
@@ -203,7 +223,20 @@ def getFrameFromVideo(videoFile, timestamp):
     video.set(cv2.CAP_PROP_POS_FRAMES, frameNumber)
     result, frame = video.read()
     video.release()
+    os.system(f'del {tempFileName} > NUL 2>&1')
     return frame
+
+def getlenghtOfVideo(videoFile):
+    tempFileName = 'temp'+''.join(secrets.choice(string.digits) for i in range(6))+'.mp4'
+    os.system(f'del {tempFileName} > NUL 2>&1')
+    cmd = f'ffmpeg-7.0.2-full_build\\bin\\ffmpeg -i "{videoFile}" {tempFileName} > NUL 2>&1'
+    os.system(cmd)
+    video = cv2.VideoCapture(tempFileName)
+    framesPerSecond = int(video.get(cv2.CAP_PROP_FPS))
+    totalFrames = video.get(cv2.CAP_PROP_FRAME_COUNT)
+    video.release()
+    os.system(f'del {tempFileName} > NUL 2>&1')
+    return totalFrames / framesPerSecond
 
 def saveFrame(frame, filename):
     cv2.imwrite(filename, resizeFrame(resizeFrame(frame)))    
@@ -294,7 +327,7 @@ def addFaceToActiveEmployees(face, name):
                 area = img.shape[0] * img.shape[1]
                 if area < smallestFaceArea:
                     smallestFaceArea = area
-                    smallestFaceFile = file.splt('.')[0]
+                    smallestFaceFile = file.split('.')[0]
                     smallestFaceExt = file.split('.')[1]
 
         if smallestFaceFile is not None:
@@ -309,8 +342,9 @@ def addFaceToActiveEmployees(face, name):
 if __name__ == "__main__":
     logDir = 'C:\\Users\\jwatts\\pythonstuff\\project\\logs\\'
 
-    debug = True
+    #debug = True
     target = '.\\downloadedvideos\\ACCC8EA989FF_20241101_113852.mkv'
+    #target = '.\\downloadedvideos\\ACCC8EA987BC_20241109_074513.mkv'
 
     startTime = time.time()
     print(f'loading active employees...', end='')
